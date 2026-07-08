@@ -139,6 +139,107 @@ class VPSManagerApp:
         print(f"\n{CLR_GREEN}[✓] Server '{alias}' berhasil ditambahkan!{CLR_RESET}")
         input("\nTekan Enter untuk kembali...")
 
+    def menu_edit_server(self):
+        if not self.list_servers_table(check_status=False):
+            input("\nTekan Enter..."); return
+
+        target = self.prompt("\nMasukkan Nomor atau Alias Server yang ingin diedit")
+        if not target: return
+
+        selected_idx = -1
+        selected = None
+
+        if target.isdigit():
+            idx = int(target) - 1
+            if 0 <= idx < len(self.servers):
+                selected_idx = idx
+                selected = self.servers[idx]
+        else:
+            for i, s in enumerate(self.servers):
+                if s.alias.lower() == target.lower():
+                    selected_idx = i
+                    selected = s
+                    break
+
+        if selected is None:
+            print(f"{CLR_RED}[!] Server tidak ditemukan.{CLR_RESET}")
+            input("\nTekan Enter..."); return
+
+        self.clear()
+        self.header(f"EDIT SERVER: {selected.alias}")
+        print(f"{CLR_YELLOW}Tekan [Enter] langsung untuk mempertahankan nilai lama.{CLR_RESET}\n")
+
+        # 1. Edit Alias
+        new_alias = self.prompt("Alias Baru", default=selected.alias)
+        if new_alias != selected.alias:
+            if any(s.alias.lower() == new_alias.lower() for i, s in enumerate(self.servers) if i != selected_idx):
+                print(f"{CLR_RED}[!] Alias '{new_alias}' sudah digunakan oleh server lain!{CLR_RESET}")
+                input("\nTekan Enter..."); return
+
+        # 2. Edit Host
+        new_host = self.prompt("Host / IP Baru", default=selected.host)
+
+        # 3. Edit User
+        new_user = self.prompt("Username SSH Baru", default=selected.user)
+
+        # 4. Edit Port
+        new_port_str = self.prompt("Port SSH Baru", default=str(selected.port))
+        try:
+            new_port = int(new_port_str)
+        except ValueError:
+            print(f"{CLR_RED}[!] Port harus angka!{CLR_RESET}")
+            input("\nTekan Enter..."); return
+
+        # 5. Edit Autentikasi
+        curr_auth = "SSH Key" if selected.auth_type == "key" else "Password VPS"
+        print(f"\nTipe Autentikasi Saat Ini: {CLR_BOLD}{curr_auth}{CLR_RESET}")
+        change_auth = self.prompt("Ganti tipe autentikasi? (y/N)", default="n").lower()
+
+        new_auth_type = selected.auth_type
+        new_password = selected.password
+        new_key_path = selected.key_path
+
+        if change_auth == "y":
+            print(f"\n{CLR_BOLD}Pilih Tipe Autentikasi Baru:{CLR_RESET}")
+            print("1. SSH Keyfile")
+            print("2. Password VPS")
+            auth_choice = self.prompt("Pilihan (1-2)", default="1")
+            if auth_choice == "2":
+                new_auth_type = "password"
+                new_password = self.prompt("Masukkan Password VPS Baru (Input Tersembunyi)", secret=True)
+                new_key_path = None
+            else:
+                new_auth_type = "key"
+                new_key_path = self.prompt("Path ke SSH Keyfile Baru", default="~/.ssh/id_rsa")
+                new_password = None
+        else:
+            # Jika tipe autentikasi tidak diganti, namun user ingin mengupdate password/keypath saat ini
+            if selected.auth_type == "password":
+                update_pass = self.prompt("Ganti Password VPS saat ini? (y/N)", default="n").lower()
+                if update_pass == "y":
+                    new_password = self.prompt("Masukkan Password VPS Baru (Input Tersembunyi)", secret=True)
+            else:
+                new_key_path = self.prompt("Path ke SSH Keyfile", default=selected.key_path)
+
+        # 6. Edit Deskripsi
+        new_desc = self.prompt("Deskripsi Baru", default=selected.description)
+
+        # Terapkan Perubahan
+        self.servers[selected_idx] = Server(
+            alias=new_alias,
+            host=new_host,
+            user=new_user,
+            port=new_port,
+            auth_type=new_auth_type,
+            password=new_password,
+            key_path=new_key_path,
+            description=new_desc
+        )
+        self.save_servers()
+
+        print(f"\n{CLR_GREEN}[✓] Data server '{new_alias}' sukses diperbarui!{CLR_RESET}")
+        input("\nTekan Enter...")
+
     def menu_remove_server(self):
         if not self.list_servers_table(check_status=False):
             input("\nTekan Enter..."); return
@@ -260,13 +361,14 @@ class VPSManagerApp:
                 print(f" {CLR_BOLD}1.{CLR_RESET} Tampilkan Daftar VPS")
                 print(f" {CLR_BOLD}2.{CLR_RESET} Cek Status Koneksi VPS (Online/Offline)")
                 print(f" {CLR_BOLD}3.{CLR_RESET} Tambah Server Baru")
-                print(f" {CLR_BOLD}4.{CLR_RESET} Hapus Server")
-                print(f" {CLR_BOLD}5.{CLR_RESET} Koneksi SSH Cepat (Auto-Login)")
-                print(f" {CLR_BOLD}6.{CLR_RESET} Jalankan Perintah Massal (Multi-exec)")
+                print(f" {CLR_BOLD}4.{CLR_RESET} Edit Data Server")
+                print(f" {CLR_BOLD}5.{CLR_RESET} Hapus Server")
+                print(f" {CLR_BOLD}6.{CLR_RESET} Koneksi SSH Cepat (Auto-Login)")
+                print(f" {CLR_BOLD}7.{CLR_RESET} Jalankan Perintah Massal (Multi-exec)")
                 print(f" {CLR_BOLD}0.{CLR_RESET} Keluar Aplikasi")
                 print(f"\n{CLR_BLUE}{'=' * 65}{CLR_RESET}")
                 
-                choice = self.prompt("Pilih Opsi [0-6]", default="1")
+                choice = self.prompt("Pilih Opsi [0-7]", default="1")
 
                 if choice == "1":
                     self.list_servers_table(check_status=False)
@@ -277,10 +379,12 @@ class VPSManagerApp:
                 elif choice == "3":
                     self.menu_add_server()
                 elif choice == "4":
-                    self.menu_remove_server()
+                    self.menu_edit_server()
                 elif choice == "5":
-                    self.menu_connect_ssh()
+                    self.menu_remove_server()
                 elif choice == "6":
+                    self.menu_connect_ssh()
+                elif choice == "7":
                     self.menu_execute_command()
                 elif choice == "0":
                     print(f"\n{CLR_GREEN}Selamat tinggal!{CLR_RESET}")
@@ -288,3 +392,4 @@ class VPSManagerApp:
             except KeyboardInterrupt:
                 print(f"\n\n{CLR_GREEN}Sampai jumpa!{CLR_RESET}")
                 sys.exit(0)
+    
