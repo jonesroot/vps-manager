@@ -3,7 +3,7 @@ import os
 import sys
 import json
 import getpass
-import subprocesss
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from vps_manager.config import CONFIG_FILE, CLR_RESET, CLR_BOLD, CLR_RED, CLR_GREEN, CLR_YELLOW, CLR_BLUE, CLR_CYAN, init_storage
 from vps_manager.models import Server
