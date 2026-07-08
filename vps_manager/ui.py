@@ -1,13 +1,13 @@
-from asyncio import subprocess
+# vps_manager/ui.py
 import os
 import sys
 import json
 import getpass
+import subprocesss
 from concurrent.futures import ThreadPoolExecutor
 from vps_manager.config import CONFIG_FILE, CLR_RESET, CLR_BOLD, CLR_RED, CLR_GREEN, CLR_YELLOW, CLR_BLUE, CLR_CYAN, init_storage
 from vps_manager.models import Server
 from vps_manager.ssh import SSHService
-
 
 class VPSManagerApp:
     def __init__(self):
@@ -108,6 +108,7 @@ class VPSManagerApp:
             print(f"{CLR_RED}[!] Port harus berupa angka!{CLR_RESET}")
             input("\nTekan Enter..."); return
 
+        # Memilih Tipe Autentikasi
         print(f"\n{CLR_BOLD}Tipe Autentikasi:{CLR_RESET}")
         print("1. SSH Keyfile (Direkomendasikan)")
         print("2. Password VPS")
@@ -179,9 +180,11 @@ class VPSManagerApp:
             print(f"{CLR_RED}[!] Server target tidak ditemukan.{CLR_RESET}")
             input("\nTekan Enter..."); return
 
+        # Check untuk sshpass jika user menggunakan password auth
         if selected.auth_type == "password" and not SSHService.is_sshpass_installed():
             print(f"\n{CLR_YELLOW}[⚠️] Peringatan: Paket 'sshpass' belum terpasang.")
             print(f"Sistem akan dialihkan ke autentikasi interaktif manual.{CLR_RESET}")
+            # Buat instance sementara tanpa password agar ssh native meminta password secara aman di terminal
             selected = Server(
                 alias=selected.alias, host=selected.host, user=selected.user,
                 port=selected.port, auth_type="password", password=None, description=selected.description
