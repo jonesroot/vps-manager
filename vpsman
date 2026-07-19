@@ -1,12 +1,86 @@
 #!/usr/bin/env python3
-# vpsman
-import sys
-from pathlib import Path
+# vpsman - Bootstrapper Aplikasi VPS Manager (Enterprise Core)
+# Lucifer 2026
 
-sys.path.append(str(Path(__file__).resolve().parent))
+import sys
+import pathlib
+import asyncio
+
+current_dir = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(current_dir))
 
 from vps_manager.ui import VPSManagerApp
 
-if __name__ == "__main__":
+
+def show_help():
+    print("""
+VPS Manager CLI - System Automation Mode
+
+Penggunaan:
+  vpsman                      Menjalankan Console Dashboard Interaktif (Default UI)
+  vpsman list                 Menampilkan tabel daftar server secara instan
+  vpsman status               Menampilkan monitor kesehatan VPS secara real-time
+  vpsman exec <alias> <cmd>   Eksekusi perintah non-interaktif pada server tertentu
+  vpsman help                 Menampilkan menu bantuan ini
+
+Contoh:
+  vpsman exec web-prod "systemctl status nginx"
+""")
+
+
+async def handle_arguments(app: VPSManagerApp, args: list):
+    cmd = args[1].lower()
+    if cmd == "list":
+        await app.list_servers_table(check_status=False)
+    elif cmd in ("status", "monitor"):
+        await app.list_servers_table(check_status=True)
+    elif cmd == "exec":
+        if len(args) < 4:
+            print("[!] Error: Format perintah tidak lengkap. Gunakan: vpsman exec <alias> <perintah>")
+            sys.exit(1)
+        alias_target = args[2]
+        remote_cmd = args[3]
+        
+        target = next((s for s in app.servers if s.alias.lower() == alias_target.lower()), None)
+        if not target:
+            print(f"[!] Error: Server dengan alias '{alias_target}' tidak ditemukan.")
+            sys.exit(1)
+            
+        print(f"[*] Menjalankan perintah pada [{target.alias}] ({target.host})...")
+        from vps_manager.ssh import SSHService
+        alias, code, stdout, stderr = await SSHService.execute_command_async(target, remote_cmd)
+        if code == 0:
+            print(stdout.strip())
+        else:
+            print(f"[Exit Code {code}] Error:\n{stderr.strip()}", file=sys.stderr)
+            sys.exit(code)
+    else:
+        show_help()
+
+
+def main():
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
     app = VPSManagerApp()
-    app.run()
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1].lower() in ("-h", "--help", "help"):
+            show_help()
+            sys.exit(0)
+        try:
+            asyncio.run(handle_arguments(app, sys.argv))
+        except Exception as e:
+            print(f"[!] Terjadi kesalahan sistem: {e}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+        
+    try:
+        asyncio.run(app.run())
+    except (KeyboardInterrupt, SystemExit):
+        print("\n\033[38;2;95;255;95m✔ Sesi ditutup dengan aman. Sampai jumpa kembali!\033[0m")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
