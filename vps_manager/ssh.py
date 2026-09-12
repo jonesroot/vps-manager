@@ -97,10 +97,13 @@ class SSHService:
         Returns:
             Latency in ms as a float rounded to 1 decimal, or None if unreachable.
         """
+        # Clean IPv6 bracket notation if present
+        clean_host = host[1:-1] if (host.startswith("[") and host.endswith("]")) else host
+
         t_start = time.monotonic()
         try:
             conn_coro = asyncio.open_connection(
-                host=host,
+                host=clean_host,
                 port=port,
                 family=socket.AF_UNSPEC,
             )
@@ -143,12 +146,18 @@ class SSHService:
             validated_path = SSHKeyValidator.validate_key_file(server.key_path)
             client_keys = [str(validated_path)]
 
-        # Prepare asyncssh client options
-        known_hosts_target: object = known_hosts if known_hosts is not None else ()
+        # If known_hosts is None, pass None to disable verification for cloud instances.
+        # Passing () forces verification against an empty set, which always fails.
+        known_hosts_target: object = known_hosts if known_hosts is not None else None
+
+        # Pass () to completely disable the SSH agent if not explicitly requested
+        agent_target: object = None if server.auth_type == AuthType.AGENT else ()
+
+        clean_host = server.host[1:-1] if (server.host.startswith("[") and server.host.endswith("]")) else server.host
 
         try:
             conn_coro = asyncssh.connect(
-                host=server.host,
+                host=clean_host,
                 port=server.port,
                 username=server.user,
                 password=password,
@@ -157,7 +166,7 @@ class SSHService:
                 known_hosts=known_hosts_target,
                 login_timeout=server.connect_timeout,
                 connect_timeout=server.connect_timeout,
-                agent_path=None if server.auth_type != AuthType.AGENT else cast(str, None),
+                agent_path=cast(str | None, agent_target),
             )
             async with conn_coro as conn:
                 yield conn
@@ -282,9 +291,13 @@ class SSHService:
             Tuples of (stream_name, text_chunk) where stream_name is 'stdout' or 'stderr'.
         """
         async with cls.acquire_connection(server, vault=vault) as conn:
-            async with conn.create_process(command) as process:
+            # Enable UTF-8 decoding to ensure SSHReader yields str rather than raw bytes
+            async with conn.create_process(command, encoding="utf-8", errors="replace") as process:
                 stdout_stream = process.stdout
                 stderr_stream = process.stderr
+
+                if stdout_stream is None or stderr_stream is None:
+                    return
 
                 async def _stream_reader(
                     reader: asyncssh.SSHReader[str],
@@ -390,7 +403,6 @@ class SSHService:
             elif mode == "MEM":
                 if ":" in line:
                     k, v = line.split(":", 1)
-                    # Extract numeric value in kB
                     match = re.search(r"(\d+)", v)
                     if match:
                         meminfo[k.strip()] = int(match.group(1)) * 1024  # Convert KiB to Bytes
@@ -401,10 +413,9 @@ class SSHService:
         uptime_sec = 0.0
         try:
             uptime_sec = float(data.get("UPTIME", "0.0"))
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
-        # Human formatted uptime
         days = int(uptime_sec // 86400)
         hours = int((uptime_sec % 86400) // 3600)
         minutes = int((uptime_sec % 3600) // 60)
@@ -412,18 +423,23 @@ class SSHService:
 
         # 2. Parse Load
         load_parts = data.get("LOAD", "0.0 0.0 0.0").split()
-        load_1m = float(load_parts[0]) if len(load_parts) > 0 else 0.0
-        load_5m = float(load_parts[1]) if len(load_parts) > 1 else 0.0
-        load_15m = float(load_parts[2]) if len(load_parts) > 2 else 0.0
+        def _to_float(val: str) -> float:
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return 0.0
+
+        load_1m = _to_float(load_parts[0]) if len(load_parts) > 0 else 0.0
+        load_5m = _to_float(load_parts[1]) if len(load_parts) > 1 else 0.0
+        load_15m = _to_float(load_parts[2]) if len(load_parts) > 2 else 0.0
 
         # 3. Parse CPUs
         cpu_count = 1
         try:
             cpu_count = max(1, int(data.get("CPUS", "1")))
-        except ValueError:
+        except (ValueError, TypeError):
             pass
 
-        # Calculate estimated CPU utilization from 1-min load average vs cores
         cpu_usage_pct = min(100.0, round((load_1m / float(cpu_count)) * 100.0, 1))
 
         # 4. Parse Memory
@@ -446,7 +462,6 @@ class SSHService:
 
         if df_line:
             parts = df_line.split()
-            # Standard df -P format: Filesystem 1024-blocks Used Available Capacity Mounted on
             if len(parts) >= 5:
                 try:
                     disk_total = int(parts[1]) * 1024
@@ -485,11 +500,9 @@ class SSHService:
         *,
         vault: SecretVault | None = None,
     ) -> list[str]:
-        """Build OpenSSH CLI invocation arguments for interactive terminal takeover.
+        """Build OpenSSH CLI invocation arguments for interactive terminal takeover."""
+        clean_host = server.host[1:-1] if (server.host.startswith("[") and server.host.endswith("]")) else server.host
 
-        Used when suspending the Textual TUI to attach a full interactive pty session
-        to the user's native terminal emulator.
-        """
         cmd: list[str] = [
             "ssh",
             "-p",
@@ -500,10 +513,12 @@ class SSHService:
             "ServerAliveInterval=30",
             "-o",
             "ServerAliveCountMax=3",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
         ]
 
         if server.auth_type == AuthType.KEY_FILE and server.key_path:
             cmd.extend(["-i", str(Path(server.key_path).expanduser().resolve())])
 
-        cmd.append(f"{server.user}@{server.host}")
+        cmd.append(f"{server.user}@{clean_host}")
         return cmd

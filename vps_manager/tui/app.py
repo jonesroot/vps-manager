@@ -4,7 +4,7 @@ vps_manager.tui.app
 
 Main Textual Application orchestrator for VPS Manager.
 Manages application lifecycle, terminal suspension, reactive filtering,
-and asynchronous telemetry polling.
+asynchronous telemetry polling, and automated crash interception.
 
 :copyright: (c) 2025 by Elite Systems Architecture.
 :license: MIT, see LICENSE for more details.
@@ -23,9 +23,11 @@ from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.containers import Horizontal, Vertical
+from textual.events import Key
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
+from vps_manager.logger import log_error
 from vps_manager.models import Server
 from vps_manager.security import SecretVault
 from vps_manager.ssh import SSHService
@@ -107,18 +109,18 @@ class VPSManagerApp(App[None]):
     """
 
     BINDINGS = [
-        Binding("a", "add_server", "Add", show=True, priority=True),
-        Binding("e", "edit_server", "Edit", show=True, priority=True),
-        Binding("d", "delete_server", "Del", show=True, priority=True),
-        Binding("enter", "connect_terminal", "Shell", show=True, priority=True),
-        Binding("space", "toggle_selection", "Select", show=True, priority=True),
-        Binding("b", "batch_exec", "Batch", show=True, priority=True),
-        Binding("r", "refresh_active", "Probe", show=True, priority=True),
-        Binding("R", "refresh_fleet", "Fleet", show=True, priority=True),
-        Binding("slash", "focus_search", "Search [/]", show=True, priority=True),
-        Binding("c", "clear_search", "Clear", show=False, priority=True),
-        Binding("question_mark", "show_help", "Help", show=True, priority=True),
-        Binding("q", "quit", "Quit", show=True, priority=True),
+        Binding("enter", "connect_terminal", "Shell", show=True),
+        Binding("a", "add_server", "Add", show=True),
+        Binding("e", "edit_server", "Edit", show=True),
+        Binding("d", "delete_server", "Del", show=True),
+        Binding("space", "toggle_selection", "Select", show=True),
+        Binding("b", "batch_exec", "Batch", show=True),
+        Binding("r", "refresh_active", "Probe", show=True),
+        Binding("R", "refresh_fleet", "Fleet", show=True),
+        Binding("slash", "focus_search", "Search [/]", show=True),
+        Binding("c", "clear_search", "Clear", show=False),
+        Binding("question_mark", "show_help", "Help", show=True),
+        Binding("q", "quit", "Quit", show=True),
     ]
 
     def __init__(
@@ -138,12 +140,17 @@ class VPSManagerApp(App[None]):
         self._active_filter: str = ""
         self._polling_active: bool = False
 
+    def _handle_exception(self, error: Exception) -> None:
+        """Intercept all internal Textual runtime, layout, and rendering exceptions."""
+        log_error(error, context="Textual TUI Internal Runtime Exception")
+        super()._handle_exception(error)
+
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield FleetSummaryBar(id="fleet-summary")
 
-        # Quick clickable action buttons with visible icons and text
         with Horizontal(id="action-bar"):
+            yield Button("▶ Connect [Enter]", variant="success", id="btn-quick-connect")
             yield Button("+ Add [a]", variant="primary", id="btn-quick-add")
             yield Button("✏ Edit [e]", variant="default", id="btn-quick-edit")
             yield Button("🗑 Del [d]", variant="error", id="btn-quick-delete")
@@ -176,7 +183,11 @@ class VPSManagerApp(App[None]):
     async def on_mount(self) -> None:
         self.reload_servers_from_storage()
         table = self.query_one("#server-table", ServerDataTable)
-        table.focus()
+        if len(self._all_servers) > 0:
+            table.focus()
+        else:
+            self.query_one("#btn-empty-add", Button).focus()
+
         self.run_worker(self._probe_fleet_worker(fetch_metrics=True))
         self.set_interval(60.0, self._scheduled_fleet_refresh)
 
@@ -214,10 +225,19 @@ class VPSManagerApp(App[None]):
         self._sync_inspector_with_cursor()
 
     def _get_focused_server(self) -> Server | None:
+        """Resolve currently highlighted server with multiple fallback strategies."""
         table = self.query_one("#server-table", ServerDataTable)
-        if table.row_count == 0 or table.cursor_row < 0:
+        if table.row_count == 0:
             return None
 
+        # Strategy 1: Direct lookup via cursor row index and ordered IDs
+        if 0 <= table.cursor_row < len(table._ordered_ids):
+            target_id = table._ordered_ids[table.cursor_row]
+            for s in self._all_servers:
+                if s.id == target_id:
+                    return s
+
+        # Strategy 2: Cell coordinate key resolution
         try:
             row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
             server_id = row_key.value
@@ -227,6 +247,11 @@ class VPSManagerApp(App[None]):
                         return s
         except Exception:
             pass
+
+        # Strategy 3: Single server fleet fallback
+        if len(self._all_servers) == 1:
+            return self._all_servers[0]
+
         return None
 
     def _sync_inspector_with_cursor(self) -> None:
@@ -242,9 +267,28 @@ class VPSManagerApp(App[None]):
     def handle_search_submitted(self) -> None:
         self.query_one("#server-table", ServerDataTable).focus()
 
+    @on(Key)
+    def handle_key_events(self, event: Key) -> None:
+        """Handle escape key when inside search input to return focus to table."""
+        if event.key == "escape":
+            search_input = self.query_one("#search-input", Input)
+            if search_input.has_focus:
+                self.query_one("#server-table", ServerDataTable).focus()
+                event.stop()
+
     @on(DataTable.RowHighlighted, "#server-table")
     def handle_row_highlighted(self) -> None:
         self._sync_inspector_with_cursor()
+
+    @on(DataTable.RowSelected, "#server-table")
+    def handle_row_selected(self) -> None:
+        """Trigger interactive SSH terminal session when Enter is pressed on table row."""
+        self.action_connect_terminal()
+
+    @on(Button.Pressed, "#btn-quick-connect")
+    @on(Button.Pressed, "#btn-card-connect")
+    def on_click_connect(self) -> None:
+        self.action_connect_terminal()
 
     @on(Button.Pressed, "#btn-quick-add")
     @on(Button.Pressed, "#btn-empty-add")
@@ -353,6 +397,7 @@ class VPSManagerApp(App[None]):
         )
 
     def action_connect_terminal(self) -> None:
+        """Launch native OpenSSH interactive shell by suspending Textual TUI."""
         server = self._get_focused_server()
         if server is None:
             return
@@ -361,6 +406,7 @@ class VPSManagerApp(App[None]):
 
         with self.suspend():
             sys.stdout.write("\033[2J\033[H")
+            sys.stdout.flush()
             print("\033[1;36m" + "=" * 70)
             print(f" VPS MANAGER PRO :: ATTACHING INTERACTIVE TERMINAL SESSION")
             print(f" Target Node : {server.alias} ({server.user}@{server.host}:{server.port})")
@@ -376,6 +422,8 @@ class VPSManagerApp(App[None]):
 
             print("\n\033[1;33mReturning to VPS Manager TUI...\033[0m")
             time.sleep(0.5)
+
+        self.refresh()
 
     def action_refresh_active(self) -> None:
         server = self._get_focused_server()

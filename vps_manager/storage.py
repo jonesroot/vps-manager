@@ -29,7 +29,6 @@ else:
     import msvcrt
 
 from vps_manager.models import (
-    AuthType,
     Server,
     ServerStatus,
     SystemMetrics,
@@ -87,27 +86,37 @@ class FileLock:
         start_time = time.monotonic()
         backoff = 0.01
 
-        # Ensure parent directory exists
+        # Ensure parent directory exists and has private permissions
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         FileSecurity.enforce_private_directory_permissions(self._lock_path.parent)
 
-        flags = os.O_RDWR | os.O_CREAT | os.O_TRUNC
-        fd = os.open(str(self._lock_path), flags, 0o600)
+        flags = os.O_RDWR | os.O_CREAT
+        lock_str = str(self._lock_path)
 
         while True:
+            fd: int | None = None
             try:
+                fd = os.open(lock_str, flags, 0o600)
                 if sys.platform != "win32":
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 else:
+                    # Windows byte-range locking requires file to have at least 1 byte
+                    if os.path.getsize(lock_str) < 1:
+                        os.write(fd, b"\0")
+                    os.lseek(fd, 0, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
 
                 self._file_descriptor = fd
                 return
             except (BlockingIOError, OSError):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
                 if (time.monotonic() - start_time) >= self._timeout_seconds:
-                    os.close(fd)
                     raise LockTimeoutError(
-                        f"Timed out after {self._timeout_seconds}s waiting for lock: '{self._lock_path}'"
+                        f"Timed out after {self._timeout_seconds:.1f}s waiting for lock: '{self._lock_path}'"
                     )
                 time.sleep(backoff)
                 backoff = min(0.2, backoff * 1.5)
@@ -115,19 +124,22 @@ class FileLock:
     def release(self) -> None:
         """Release lock and cleanly close file descriptor."""
         if self._file_descriptor is not None:
+            fd = self._file_descriptor
+            self._file_descriptor = None
             try:
                 if sys.platform != "win32":
-                    fcntl.flock(self._file_descriptor, fcntl.LOCK_UN)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
                 else:
                     try:
-                        msvcrt.locking(self._file_descriptor, msvcrt.LK_UNLCK, 1)
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                     except OSError:
                         pass
-                os.close(self._file_descriptor)
-            except OSError:
-                pass
             finally:
-                self._file_descriptor = None
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def __enter__(self) -> Self:
         self.acquire()
@@ -254,9 +266,7 @@ class ServerRepository:
                 if existing.id == server.id:
                     raise DuplicateServerError(f"Server ID '{server.id}' collision detected.")
 
-            # Encrypt secrets transparently before staging
-            secured_server = self._encrypt_server_secrets(server)
-            servers.append(secured_server)
+            servers.append(server)
             self._write_atomic(servers)
 
     def update(self, server: Server) -> None:
@@ -281,8 +291,7 @@ class ServerRepository:
             if target_index is None:
                 raise ServerNotFoundError(f"Server with ID '{server.id}' not found.")
 
-            secured_server = self._encrypt_server_secrets(server)
-            servers[target_index] = secured_server
+            servers[target_index] = server
             self._write_atomic(servers)
 
     def delete(self, server_id: str) -> None:
@@ -390,7 +399,7 @@ class ServerRepository:
             added_count = 0
             for imp in imported_servers:
                 if imp.alias.lower() not in existing_aliases and imp.id not in existing_ids:
-                    existing.append(self._encrypt_server_secrets(imp))
+                    existing.append(imp)
                     existing_aliases.add(imp.alias.lower())
                     existing_ids.add(imp.id)
                     added_count += 1
@@ -420,14 +429,13 @@ class ServerRepository:
 
         servers = self._parse_json_tree(raw_json)
 
-        # Decrypt passwords if vault is available
+        # Decrypt passwords transparently for in-memory use
         if self._vault:
             decrypted_list: list[Server] = []
             for s in servers:
                 dec_pw = self._vault.decrypt(s.password) if s.password else None
                 dec_pp = self._vault.decrypt(s.key_passphrase) if s.key_passphrase else None
                 if dec_pw != s.password or dec_pp != s.key_passphrase:
-                    # Return copy with decrypted in-memory values
                     s = Server(
                         id=s.id,
                         alias=s.alias,
@@ -480,12 +488,17 @@ class ServerRepository:
         raise StorageError("Unrecognized database JSON structure.")
 
     def _encrypt_server_secrets(self, server: Server) -> Server:
-        """Ensure password and private key passphrases are encrypted via Vault."""
+        """Ensure password and private key passphrases are encrypted before saving to disk."""
         if not self._vault:
             return server
 
-        enc_pw = self._vault.encrypt(server.password) if server.password else None
-        enc_pp = self._vault.encrypt(server.key_passphrase) if server.key_passphrase else None
+        enc_pw = server.password
+        if server.password and not self._vault.is_encrypted(server.password):
+            enc_pw = self._vault.encrypt(server.password)
+
+        enc_pp = server.key_passphrase
+        if server.key_passphrase and not self._vault.is_encrypted(server.key_passphrase):
+            enc_pp = self._vault.encrypt(server.key_passphrase)
 
         if enc_pw == server.password and enc_pp == server.key_passphrase:
             return server
@@ -510,14 +523,20 @@ class ServerRepository:
         )
 
     def _write_atomic(self, servers: Sequence[Server]) -> None:
-        """Write server list atomically via temporary file rename swap."""
+        """Write server list atomically via temporary file rename swap.
+
+        Enforces transparent AES-256-GCM encryption on all credentials before writing.
+        """
         self._storage_path.parent.mkdir(parents=True, exist_ok=True)
         FileSecurity.enforce_private_directory_permissions(self._storage_path.parent)
 
         payload: dict[str, object] = {
             "version": CURRENT_SCHEMA_VERSION,
             "updated_at": time.time(),
-            "servers": [s.to_dict(include_secrets=True) for s in servers],
+            "servers": [
+                self._encrypt_server_secrets(s).to_dict(include_secrets=True)
+                for s in servers
+            ],
         }
 
         # Encode JSON deterministically with indentation

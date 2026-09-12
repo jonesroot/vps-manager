@@ -10,6 +10,7 @@ servers.json
 *.servers.json
 .servers.lock
 *.lock
+vps_backup_*.json
 
 # Vault master encryption keys and private keys
 .vault.key

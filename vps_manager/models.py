@@ -197,7 +197,8 @@ class SystemMetrics:
 _HOSTNAME_REGEX = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$"
 )
-_USERNAME_REGEX = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$", re.IGNORECASE)
+# Expanded to support domain usernames, dots, and up to 64 chars
+_USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_.][a-zA-Z0-9_.-]{0,63}$")
 
 
 @dataclass(slots=True, kw_only=True, frozen=True)
@@ -251,7 +252,7 @@ class Server:
         trimmed_user: str = self.user.strip()
         if not trimmed_user or not _USERNAME_REGEX.match(trimmed_user):
             raise ValidationError(
-                f"Invalid SSH username '{trimmed_user}'. Must match standard POSIX naming conventions."
+                f"Invalid SSH username '{trimmed_user}'. Must match standard POSIX/cloud naming conventions."
             )
         object.__setattr__(self, "user", trimmed_user)
 
@@ -279,13 +280,18 @@ class Server:
 
     @staticmethod
     def _is_valid_host(host: str) -> bool:
-        """Verify whether string is a valid IPv4, IPv6, or compliant FQDN."""
+        """Verify whether string is a valid IPv4, IPv6 (with or without brackets), or compliant FQDN."""
+        cleaned = host
+        if cleaned.startswith("[") and cleaned.endswith("]"):
+            cleaned = cleaned[1:-1]
+
         # Check standard IP address
         try:
-            ipaddress.ip_address(host)
+            ipaddress.ip_address(cleaned)
             return True
         except ValueError:
             pass
+
         # Check RFC-1123 hostname
         return bool(_HOSTNAME_REGEX.match(host))
 

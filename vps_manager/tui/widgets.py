@@ -19,7 +19,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import DataTable, Static
+from textual.widgets import Button, DataTable, Static
 
 from vps_manager.models import (
     Server,
@@ -136,19 +136,26 @@ class ResourceBar(Widget):
         yield Static("", id=f"{self._label.lower()}-bar-display", classes="gauge-bar")
         yield Static(self.detail_text, id=f"{self._label.lower()}-val-display", classes="gauge-value")
 
-    def watch_percentage(self, new_val: float) -> None:
+    def on_mount(self) -> None:
+        """Render bar visualization immediately upon mounting."""
         self._update_display()
 
+    def watch_percentage(self, new_val: float) -> None:
+        if self.is_mounted:
+            self._update_display()
+
     def watch_detail_text(self, new_val: str) -> None:
-        try:
-            val_widget = self.query_one(f"#{self._label.lower()}-val-display", Static)
-            val_widget.update(new_val)
-        except Exception:
-            pass
+        if self.is_mounted:
+            try:
+                val_widget = self.query_one(f"#{self._label.lower()}-val-display", Static)
+                val_widget.update(new_val)
+            except Exception:
+                pass
 
     def _update_display(self) -> None:
         try:
             bar_widget = self.query_one(f"#{self._label.lower()}-bar-display", Static)
+            val_widget = self.query_one(f"#{self._label.lower()}-val-display", Static)
         except Exception:
             return
 
@@ -166,6 +173,7 @@ class ResourceBar(Widget):
         bar_text.append(f" {pct:.1f}%", style=color)
 
         bar_widget.update(bar_text)
+        val_widget.update(self.detail_text)
 
 
 # ============================================================================
@@ -174,7 +182,7 @@ class ResourceBar(Widget):
 
 
 class ServerTelemetryCard(Widget):
-    """Detailed live telemetry dashboard for a single selected server."""
+    """Detailed live telemetry dashboard with integrated connect trigger."""
 
     DEFAULT_CSS = """
     ServerTelemetryCard {
@@ -200,10 +208,11 @@ class ServerTelemetryCard(Widget):
         border-top: solid $primary-muted;
         padding-top: 1;
     }
-    .empty-state-card {
-        color: $text-muted;
-        margin-top: 2;
-        text-align: center;
+    #btn-card-connect {
+        width: 100%;
+        margin-top: 1;
+        text-style: bold;
+        height: 3;
     }
     """
 
@@ -217,13 +226,26 @@ class ServerTelemetryCard(Widget):
                 yield ResourceBar(label="CPU", id="card-cpu-bar")
                 yield ResourceBar(label="RAM", id="card-ram-bar")
                 yield ResourceBar(label="DSK", id="card-dsk-bar")
+            yield Button("▶ Connect to Shell [Enter]", variant="success", id="btn-card-connect")
+
+    def on_mount(self) -> None:
+        """Render server details on initial mount."""
+        self._render_details(self.server)
 
     def watch_server(self, srv: Server | None) -> None:
-        title_widget = self.query_one("#inspector-title", Static)
-        meta_widget = self.query_one("#inspector-meta", Static)
-        cpu_bar = self.query_one("#card-cpu-bar", ResourceBar)
-        ram_bar = self.query_one("#card-ram-bar", ResourceBar)
-        dsk_bar = self.query_one("#card-dsk-bar", ResourceBar)
+        if self.is_mounted:
+            self._render_details(srv)
+
+    def _render_details(self, srv: Server | None) -> None:
+        try:
+            title_widget = self.query_one("#inspector-title", Static)
+            meta_widget = self.query_one("#inspector-meta", Static)
+            cpu_bar = self.query_one("#card-cpu-bar", ResourceBar)
+            ram_bar = self.query_one("#card-ram-bar", ResourceBar)
+            dsk_bar = self.query_one("#card-dsk-bar", ResourceBar)
+            btn_connect = self.query_one("#btn-card-connect", Button)
+        except Exception:
+            return
 
         if srv is None:
             title_widget.update("SERVER INSPECTOR")
@@ -241,8 +263,10 @@ class ServerTelemetryCard(Widget):
             ram_bar.detail_text = "Idle"
             dsk_bar.percentage = 0.0
             dsk_bar.detail_text = "Idle"
+            btn_connect.disabled = True
             return
 
+        btn_connect.disabled = False
         title_widget.update(f"NODE: {srv.alias.upper()}")
 
         meta = Text()
@@ -253,7 +277,7 @@ class ServerTelemetryCard(Widget):
             f"{srv.status.value.upper()} ",
             style="bold green" if srv.status == ServerStatus.ONLINE else "bold red",
         )
-        if srv.latency_ms:
+        if srv.latency_ms is not None:
             meta.append(f"({srv.latency_ms:.1f} ms) ", style="green")
         meta.append(f"• Group: {srv.group} • Auth: {srv.auth_type.value}\n")
 
@@ -373,10 +397,9 @@ class ServerDataTable(DataTable[str]):
     ) -> None:
         super().__init__(name=name, id=id, classes=classes, cursor_type="row")
         self._selected_ids: set[str] = set()
-        self._row_keys: dict[str, str] = {}
+        self._ordered_ids: list[str] = []
 
     def on_mount(self) -> None:
-        # Optimized column widths to eliminate horizontal overflow
         self.add_column("SEL", width=4, key="col_sel")
         self.add_column("STATUS", width=14, key="col_status")
         self.add_column("ALIAS", width=14, key="col_alias")
@@ -393,32 +416,54 @@ class ServerDataTable(DataTable[str]):
         else:
             self._selected_ids.add(server_id)
 
-        if server_id in self._row_keys:
-            rk = self._row_keys[server_id]
+        if server_id in self._ordered_ids:
             is_sel = server_id in self._selected_ids
             sel_text = Text("[X]", style="bold green") if is_sel else Text("[ ]", style="dim white")
-            self.update_cell(rk, "col_sel", sel_text)
+            try:
+                self.update_cell(server_id, "col_sel", sel_text)
+            except Exception:
+                pass
 
     def get_selected_server_ids(self) -> set[str]:
         return set(self._selected_ids)
 
     def populate_servers(self, servers: Sequence[Server]) -> None:
-        current_server_ids = {s.id for s in servers}
+        """Populate or update table rows.
 
-        # Remove deleted
-        removed_ids = [s_id for s_id in self._row_keys if s_id not in current_server_ids]
-        for s_id in removed_ids:
-            rk = self._row_keys.pop(s_id)
-            self._selected_ids.discard(s_id)
+        Uses in-place cell updating when row identities and order match to eliminate
+        visual redraw flicker and preserve cursor position during telemetry polling.
+        """
+        new_ids = [s.id for s in servers]
+
+        # In-place update if row keys and order are identical
+        if new_ids == self._ordered_ids:
+            for s in servers:
+                self._update_server_row(s)
+            return
+
+        # Structural change: remember focused server ID to restore cursor
+        saved_id: str | None = None
+        if self.row_count > 0 and self.cursor_row >= 0:
             try:
-                self.remove_row(rk)
+                row_key, _ = self.coordinate_to_cell_key(self.cursor_coordinate)
+                saved_id = row_key.value
             except Exception:
                 pass
 
-        for s in servers:
-            self._upsert_server_row(s)
+        self.clear(columns=False)
+        self._ordered_ids.clear()
 
-    def _upsert_server_row(self, s: Server) -> None:
+        restore_idx: int | None = None
+        for idx, s in enumerate(servers):
+            self._insert_server_row(s)
+            self._ordered_ids.append(s.id)
+            if saved_id is not None and s.id == saved_id:
+                restore_idx = idx
+
+        if restore_idx is not None and self.row_count > 0:
+            self.move_cursor(row=restore_idx)
+
+    def _render_row_cells(self, s: Server) -> tuple[Text, ...]:
         is_sel = s.id in self._selected_ids
         sel_text = Text("[X]", style="bold green") if is_sel else Text("[ ]", style="dim white")
 
@@ -461,28 +506,37 @@ class ServerDataTable(DataTable[str]):
             dsk_text = Text("-", style="dim")
             uptime_text = Text("-", style="dim")
 
-        if s.id in self._row_keys:
-            rk = self._row_keys[s.id]
-            self.update_cell(rk, "col_sel", sel_text)
-            self.update_cell(rk, "col_status", status_text)
-            self.update_cell(rk, "col_alias", alias_text)
-            self.update_cell(rk, "col_endpoint", endpoint_text)
-            self.update_cell(rk, "col_group", group_text)
-            self.update_cell(rk, "col_cpu", cpu_text)
-            self.update_cell(rk, "col_ram", ram_text)
-            self.update_cell(rk, "col_disk", dsk_text)
-            self.update_cell(rk, "col_uptime", uptime_text)
-        else:
-            row_key = self.add_row(
-                sel_text,
-                status_text,
-                alias_text,
-                endpoint_text,
-                group_text,
-                cpu_text,
-                ram_text,
-                dsk_text,
-                uptime_text,
-                key=s.id,
-            )
-            self._row_keys[s.id] = str(row_key)
+        return (
+            sel_text,
+            status_text,
+            alias_text,
+            endpoint_text,
+            group_text,
+            cpu_text,
+            ram_text,
+            dsk_text,
+            uptime_text,
+        )
+
+    def _insert_server_row(self, s: Server) -> None:
+        cells = self._render_row_cells(s)
+        self.add_row(*cells, key=s.id)
+
+    def _update_server_row(self, s: Server) -> None:
+        cells = self._render_row_cells(s)
+        col_keys = (
+            "col_sel",
+            "col_status",
+            "col_alias",
+            "col_endpoint",
+            "col_group",
+            "col_cpu",
+            "col_ram",
+            "col_disk",
+            "col_uptime",
+        )
+        for col_key, cell_value in zip(col_keys, cells, strict=True):
+            try:
+                self.update_cell(s.id, col_key, cell_value)
+            except Exception:
+                pass

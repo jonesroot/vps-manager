@@ -15,7 +15,6 @@ import base64
 import os
 from pathlib import Path
 import platform
-import re
 import secrets
 import stat
 import sys
@@ -182,6 +181,9 @@ class MasterKeyManager:
 
     def get_or_create_machine_key(self) -> bytes:
         """Retrieve local machine master key or create a new 256-bit key if absent."""
+        parent_dir = self._key_file.parent
+        FileSecurity.enforce_private_directory_permissions(parent_dir)
+
         if self._key_file.exists():
             FileSecurity.enforce_private_file_permissions(self._key_file)
             try:
@@ -262,15 +264,20 @@ class SecretVault:
         """Encrypt plaintext string into an authenticated, base64-encoded container.
 
         Format: enc:v1:<nonce_b64>:<ciphertext_with_tag_b64>
+        Guarantees idempotency: returns original token if already encrypted.
         """
         if not plaintext:
             return ""
+
+        # Avoid nested/double encryption if payload is already sealed
+        if self.is_encrypted(plaintext):
+            return plaintext
 
         nonce = secrets.token_bytes(NONCE_SIZE_BYTES)
         data_bytes = plaintext.encode("utf-8")
 
         try:
-            # AESGCM automatically appends the 16-byte authentication tag
+            # AESGCM automatically computes and appends the 16-byte authentication tag
             ciphertext = self._cipher.encrypt(nonce, data_bytes, None)
         except Exception as exc:
             raise EncryptionError(f"AES-GCM encryption failed: {exc}") from exc
