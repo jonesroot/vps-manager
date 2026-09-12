@@ -1,0 +1,160 @@
+# ==============================================================================
+# VPS MANAGER PRO - PRODUCTION .GITIGNORE
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. CRITICAL SECURITY: SECRETS, CREDENTIALS & LOCAL CONFIG
+# ------------------------------------------------------------------------------
+# Never commit server configurations containing IPs, ports, or encrypted secrets
+servers.json
+*.servers.json
+.servers.lock
+*.lock
+
+# Vault master encryption keys and private keys
+.vault.key
+*.key
+*.pem
+*.id_rsa
+*.id_ed25519
+*.id_ecdsa
+*.id_dsa
+id_*
+!*.pub
+
+# Local environment variables and tokens
+.env
+.env.*
+!.env.example
+
+# Temporary database backups and swap files
+*.bak
+*.backup
+*.tmp
+.servers.json.*.tmp
+
+# ------------------------------------------------------------------------------
+# 2. PYTHON RUNTIME & BYTECODE
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# C extensions & native builds
+*.c
+*.html
+*.ffi
+
+# ------------------------------------------------------------------------------
+# 3. VIRTUAL ENVIRONMENTS
+# ------------------------------------------------------------------------------
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# ------------------------------------------------------------------------------
+# 4. DISTRIBUTION, PACKAGING & BUILD METADATA
+# ------------------------------------------------------------------------------
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Hatchling & Flit build caches
+.hatch/
+
+# Pip installation logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ------------------------------------------------------------------------------
+# 5. TESTING, COVERAGE & STATIC ANALYSIS
+# ------------------------------------------------------------------------------
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Pyright / Pylance / Mypy
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+
+# ------------------------------------------------------------------------------
+# 6. IDE, EDITORS & SYSTEM ARTIFACTS
+# ------------------------------------------------------------------------------
+# Visual Studio Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains (PyCharm, IntelliJ, etc.)
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Vim / Emacs / Sublime
+.*.sw[a-z]
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux desktop
+.directory
+.Trash-*
+
+# ------------------------------------------------------------------------------
+# 7. LOGS & DIAGNOSTICS
+# ------------------------------------------------------------------------------
+*.log
+logs/
+*.crash

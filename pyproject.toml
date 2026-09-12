@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vps-manager"
+version = "2.0.0"
+description = "Modern, cross-platform interactive TUI for VPS fleet orchestration."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Elite Systems Architecture" }
+]
+dependencies = [
+    "textual>=0.50.0",
+    "rich>=13.7.0",
+    "asyncssh>=2.14.2",
+    "cryptography>=42.0.0",
+]
+
+[project.scripts]
+vps-manager = "vps_manager.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vps_manager"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
