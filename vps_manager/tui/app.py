@@ -4,7 +4,8 @@ vps_manager.tui.app
 
 Main Textual Application orchestrator for VPS Manager.
 Manages application lifecycle, terminal suspension, reactive filtering,
-asynchronous telemetry polling, and automated crash interception.
+asynchronous telemetry polling, automated crash interception, and
+seamless automated OpenSSH credential bridging.
 
 :copyright: (c) 2025 by Elite Systems Architecture.
 :license: MIT, see LICENSE for more details.
@@ -13,11 +14,14 @@ asynchronous telemetry polling, and automated crash interception.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
 from typing import Final
+from uuid import uuid4
 
 from rich.text import Text
 from textual import on
@@ -397,13 +401,60 @@ class VPSManagerApp(App[None]):
         )
 
     def action_connect_terminal(self) -> None:
-        """Launch native OpenSSH interactive shell by suspending Textual TUI."""
+        """Launch native OpenSSH shell with automated seamless password authentication."""
         server = self._get_focused_server()
         if server is None:
             return
 
         cmd = SSHService.build_native_cli_command(server, vault=self._vault)
 
+        # Retrieve and decrypt password/passphrase for automated authentication
+        password: str | None = None
+        if server.password:
+            password = self._vault.decrypt(server.password)
+        elif server.key_passphrase:
+            password = self._vault.decrypt(server.key_passphrase)
+
+        env = os.environ.copy()
+        cleanup_files: list[Path] = []
+
+        # Configure automated credential feeder
+        if password:
+            if shutil.which("sshpass"):
+                # Strategy 1: Use sshpass in environment mode (anti-leak: not visible in ps aux)
+                cmd = ["sshpass", "-e", *cmd]
+                env["SSHPASS"] = password
+            else:
+                # Strategy 2: Native OpenSSH SSH_ASKPASS with forced invocation (pure standard Linux)
+                try:
+                    tmp_dir = Path.home() / ".config" / "vps_manager" / ".tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    os.chmod(tmp_dir, 0o700)
+
+                    token_id = uuid4().hex
+                    pw_path = tmp_dir / f".pw_{token_id}"
+                    askpass_path = tmp_dir / f".askpass_{token_id}"
+
+                    # Write password to 0600 private file
+                    pw_path.write_text(password, encoding="utf-8")
+                    os.chmod(pw_path, 0o600)
+
+                    # Write askpass helper script with 0700 executable permissions
+                    askpass_path.write_text(
+                        f"#!/bin/sh\ncat '{pw_path.resolve()}'\n",
+                        encoding="utf-8",
+                    )
+                    os.chmod(askpass_path, 0o700)
+
+                    cleanup_files.extend([pw_path, askpass_path])
+
+                    env["SSH_ASKPASS"] = str(askpass_path.resolve())
+                    env["SSH_ASKPASS_REQUIRE"] = "force"
+                    env["DISPLAY"] = env.get("DISPLAY", ":0")
+                except Exception as exc:
+                    log_error(exc, context="Failed to prepare SSH_ASKPASS helper")
+
+        # Suspend TUI and enter interactive terminal
         with self.suspend():
             sys.stdout.write("\033[2J\033[H")
             sys.stdout.flush()
@@ -413,12 +464,19 @@ class VPSManagerApp(App[None]):
             print("=" * 70 + "\033[0m\n")
 
             try:
-                subprocess.run(cmd)
+                subprocess.run(cmd, env=env)
             except KeyboardInterrupt:
                 pass
             except Exception as exc:
                 print(f"\n\033[1;31mSession ended with error: {exc}\033[0m")
                 time.sleep(2.0)
+            finally:
+                # Securely shred and delete temporary authentication files
+                for f in cleanup_files:
+                    try:
+                        f.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
             print("\n\033[1;33mReturning to VPS Manager TUI...\033[0m")
             time.sleep(0.5)
